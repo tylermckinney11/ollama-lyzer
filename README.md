@@ -17,6 +17,22 @@ Run a benchmark against any locally installed model, watch live request metrics,
 
 ## Quick start
 
+For the noobs:
+
+```bash
+git clone https://github.com/tylermckinney11/ollama-lyzer.git
+cd ollama-lyzer
+bash start.sh
+```
+
+One command setup:
+
+```bash 
+bash start.sh
+```
+
+Manual setup:
+
 ```bash
 # 1. Install dependencies
 npm run install:all
@@ -113,3 +129,7 @@ ollama-lyzer/
 ## License
 
 MIT
+
+---
+
+**Author**: Tyler Mckinney – [effxs.com](https://effxs.com)

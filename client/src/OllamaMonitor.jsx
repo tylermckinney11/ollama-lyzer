@@ -176,8 +176,15 @@ function RequestDetailModal({ request, prompts, history, onClose }) {
             <p style={{ color: 'var(--text-muted)', margin: 0 }}>No benchmark rows for this model.</p>
           ) : (
             nearestBenchmarks.map((b) => (
-              <div key={`bench-${b.id}`} style={{ borderBottom: '1px solid var(--border)', padding: '0.38rem 0', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                {fmtTs(b.timestamp)} | TPS {fmtNum(b.tokens_per_second, 2)} | latency {b.latency_ms ?? '-'}ms | load {b.load_time_ms ?? '-'}ms | threads {b.num_thread ?? '-'} | ctx {b.context_window ?? '-'}
+              <div key={`bench-${b.id}`} style={{ borderBottom: '1px solid var(--border)', padding: '0.38rem 0', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                <div>{fmtTs(b.timestamp)} | TPS {fmtNum(b.tokens_per_second, 2)} | latency {b.latency_ms ?? '-'}ms | load {b.load_time_ms ?? '-'}ms | threads {b.num_thread ?? '-'}</div>
+                {(b.gpu_vram_mb || b.system_ram_mb) && (
+                  <div style={{ marginTop: '0.2rem', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                    {b.gpu_vram_mb && `GPU ${b.gpu_vram_mb}MB${b.gpu_vram_pct ? `(${fmtNum(b.gpu_vram_pct, 1)}%)` : ''}`}
+                    {b.gpu_vram_mb && b.system_ram_mb && ' | '}
+                    {b.system_ram_mb && `RAM ${b.system_ram_mb}MB${b.system_ram_pct ? `(${fmtNum(b.system_ram_pct, 1)}%)` : ''}`}
+                  </div>
+                )}
               </div>
             ))
           )}
@@ -241,7 +248,7 @@ function ModelDetailModal({ model, prompts, history, onClose }) {
     ...dedupedHistory.map(h => ({
       id: `h-${h.id}`,
       ts: h.timestamp,
-      text: `Benchmark | TPS ${fmtNum(h.tokens_per_second, 2)} | latency ${h.latency_ms || '-'}ms | load ${h.load_time_ms || '-'}ms`,
+      text: `Benchmark | TPS ${fmtNum(h.tokens_per_second, 2)} | latency ${h.latency_ms || '-'}ms | load ${h.load_time_ms || '-'}ms${h.gpu_vram_mb ? ` | GPU ${h.gpu_vram_mb}MB` : ''}${h.system_ram_mb ? ` | RAM ${h.system_ram_mb}MB` : ''}`,
     })),
   ].sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime())
 
@@ -284,6 +291,18 @@ function ModelDetailModal({ model, prompts, history, onClose }) {
       if (prev.length >= 3) return prev
       return [...prev, name]
     })
+  }
+
+  async function deleteBenchmark(benchmarkId) {
+    if (!confirm('Delete this benchmark? This will recalculate averages.')) return
+    try {
+      const r = await fetch(`/api/ollama/benchmark/${benchmarkId}`, { method: 'DELETE' })
+      if (!r.ok) throw new Error('Delete failed')
+      // Re-fetch history to update UI
+      window.location.reload()
+    } catch (err) {
+      alert(`Delete failed: ${err.message}`)
+    }
   }
 
   return (
@@ -402,12 +421,25 @@ function ModelDetailModal({ model, prompts, history, onClose }) {
             </button>
           </div>
           <div style={{ marginTop: '0.5rem', maxHeight: '40vh', overflowY: 'auto' }}>
-            {combined.slice(0, visible).map((row) => (
-              <div key={row.id} style={{ borderBottom: '1px solid var(--border)', padding: '0.42rem 0.15rem', display: 'grid', gridTemplateColumns: '1fr auto', gap: '0.5rem', fontSize: '0.8rem' }}>
-                <div>{row.text}</div>
-                <div style={{ color: 'var(--text-muted)' }}>{fmtTs(row.ts)}</div>
-              </div>
-            ))}
+            {combined.slice(0, visible).map((row) => {
+              const isBenchmark = row.id.startsWith('h-')
+              const benchmarkId = isBenchmark ? parseInt(row.id.slice(2)) : null
+              return (
+                <div key={row.id} style={{ borderBottom: '1px solid var(--border)', padding: '0.42rem 0.15rem', display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '0.5rem', fontSize: '0.8rem', alignItems: 'center' }}>
+                  <div>{row.text}</div>
+                  <div style={{ color: 'var(--text-muted)' }}>{fmtTs(row.ts)}</div>
+                  {isBenchmark && (
+                    <button
+                      onClick={() => deleteBenchmark(benchmarkId)}
+                      title="Delete this benchmark"
+                      style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--danger)', cursor: 'pointer', padding: '0.2rem 0.4rem', fontSize: '0.75rem' }}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              )
+            })}
             {!combined.length && <p style={{ color: 'var(--text-muted)' }}>No runs for this model yet.</p>}
           </div>
         </div>
@@ -759,8 +791,32 @@ export default function OllamaMonitor() {
         </div>
 
         {benchResult && (
-          <div style={{ marginTop: '0.85rem', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-            Result: {benchResult.model} | TPS {fmtNum(benchResult.tokens_per_second, 2)} | Latency {benchResult.latency_ms || '-'} ms | Tokens {benchResult.total_tokens || '-'}
+          <div style={{ marginTop: '0.85rem', fontSize: '0.85rem' }}>
+            <div style={{ color: 'var(--text-muted)', marginBottom: '0.45rem', lineHeight: 1.6 }}>
+              <strong style={{ color: 'var(--text)' }}>{benchResult.model}</strong>
+              {' | '}
+              TPS {fmtNum(benchResult.tokens_per_second, 2)}
+              {' | '}
+              Latency {benchResult.latency_ms || '-'} ms
+              {' | '}
+              Tokens {benchResult.total_tokens || '-'}
+              {' | '}
+              Load {benchResult.load_time_ms || '-'} ms
+            </div>
+            <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '0.5rem' }}>
+              {benchResult.gpu_vram_mb !== null && (
+                <div style={{ background: 'var(--bg2)', padding: '0.4rem 0.6rem', borderRadius: 4 }}>
+                  GPU VRAM: <strong style={{ color: 'var(--text)' }}>{benchResult.gpu_vram_mb} MB</strong>
+                  {benchResult.gpu_vram_pct !== null && ` (${fmtNum(benchResult.gpu_vram_pct, 1)}%)`}
+                </div>
+              )}
+              {benchResult.system_ram_mb !== null && (
+                <div style={{ background: 'var(--bg2)', padding: '0.4rem 0.6rem', borderRadius: 4 }}>
+                  System RAM: <strong style={{ color: 'var(--text)' }}>{benchResult.system_ram_mb} MB</strong>
+                  {benchResult.system_ram_pct !== null && ` (${fmtNum(benchResult.system_ram_pct, 1)}%)`}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -820,11 +876,12 @@ export default function OllamaMonitor() {
                 <th style={{ textAlign: 'right', padding: '0.45rem' }}>TPS</th>
                 <th style={{ textAlign: 'right', padding: '0.45rem' }}>Duration (ms)</th>
                 <th style={{ textAlign: 'right', padding: '0.45rem' }}>Status</th>
+                <th style={{ textAlign: 'center', padding: '0.45rem' }}>Action</th>
               </tr>
             </thead>
             <tbody>
               {prompts.length === 0 && (
-                <tr><td colSpan={6} style={{ padding: '0.6rem', color: 'var(--text-muted)' }}>No prompt logs yet.</td></tr>
+                <tr><td colSpan={7} style={{ padding: '0.6rem', color: 'var(--text-muted)' }}>No prompt logs yet.</td></tr>
               )}
               {prompts.slice(0, visibleRequests).map((p) => (
                 <tr key={p.id} style={{ borderBottom: '1px solid var(--border)', cursor: 'pointer' }} onClick={() => setSelectedRequest(p)} title="Click for detailed analytics">
@@ -834,6 +891,22 @@ export default function OllamaMonitor() {
                   <td style={{ padding: '0.45rem', textAlign: 'right' }}>{fmtNum(p.tokens_per_second, 2)}</td>
                   <td style={{ padding: '0.45rem', textAlign: 'right' }}>{p.duration_ms ?? '-'}</td>
                   <td style={{ padding: '0.45rem', textAlign: 'right', color: Number(p.status_code) >= 400 ? 'var(--danger)' : 'var(--success)' }}>{p.status_code ?? '-'}</td>
+                  <td style={{ padding: '0.45rem', textAlign: 'center' }}>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        if (confirm('Delete this record? This will also remove any associated benchmark.')) {
+                          fetch(`/api/ollama/prompts/${p.id}`, { method: 'DELETE' })
+                            .then(() => window.location.reload())
+                            .catch(err => alert(`Delete failed: ${err.message}`))
+                        }
+                      }}
+                      title="Delete this record and associated benchmark"
+                      style={{ background: 'none', border: '1px solid var(--danger)', borderRadius: 4, color: 'var(--danger)', cursor: 'pointer', padding: '0.2rem 0.4rem', fontSize: '0.75rem' }}
+                    >
+                      Delete
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>

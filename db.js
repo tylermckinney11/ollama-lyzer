@@ -21,6 +21,10 @@ db.exec(`
     context_window   INTEGER,
     load_time_ms     INTEGER,
     vram_mb          INTEGER,
+    gpu_vram_mb      INTEGER,
+    gpu_vram_pct     REAL,
+    system_ram_mb    INTEGER,
+    system_ram_pct   REAL,
     temperature      REAL,
     num_predict      INTEGER,
     num_thread       INTEGER,
@@ -42,7 +46,8 @@ db.exec(`
     tokens_per_second REAL,
     status_code      INTEGER,
     error_message    TEXT,
-    request_id       TEXT
+    request_id       TEXT,
+    benchmark_id     INTEGER
   );
 
   CREATE TABLE IF NOT EXISTS ollama_settings (
@@ -63,5 +68,54 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_prompts_model
     ON ollama_prompts(model_name, timestamp);
 `)
+
+// ── Schema migrations ────────────────────────────────────────────────────────
+// Add new columns if they don't exist (for existing databases)
+const schemaCheck = db.prepare(`PRAGMA table_info(ollama_benchmarks)`).all()
+const hasGpuVramMb = schemaCheck.some(col => col.name === 'gpu_vram_mb')
+const hasGpuVramPct = schemaCheck.some(col => col.name === 'gpu_vram_pct')
+const hasSystemRamMb = schemaCheck.some(col => col.name === 'system_ram_mb')
+const hasSystemRamPct = schemaCheck.some(col => col.name === 'system_ram_pct')
+
+if (!hasGpuVramMb) {
+  try {
+    db.exec(`ALTER TABLE ollama_benchmarks ADD COLUMN gpu_vram_mb INTEGER`)
+  } catch (e) {
+    console.warn('[db] gpu_vram_mb column migration:', e.message)
+  }
+}
+if (!hasGpuVramPct) {
+  try {
+    db.exec(`ALTER TABLE ollama_benchmarks ADD COLUMN gpu_vram_pct REAL`)
+  } catch (e) {
+    console.warn('[db] gpu_vram_pct column migration:', e.message)
+  }
+}
+if (!hasSystemRamMb) {
+  try {
+    db.exec(`ALTER TABLE ollama_benchmarks ADD COLUMN system_ram_mb INTEGER`)
+  } catch (e) {
+    console.warn('[db] system_ram_mb column migration:', e.message)
+  }
+}
+if (!hasSystemRamPct) {
+  try {
+    db.exec(`ALTER TABLE ollama_benchmarks ADD COLUMN system_ram_pct REAL`)
+  } catch (e) {
+    console.warn('[db] system_ram_pct column migration:', e.message)
+  }
+}
+
+// Check prompts table for benchmark_id column
+const promptsSchemaCheck = db.prepare(`PRAGMA table_info(ollama_prompts)`).all()
+const hasBenchmarkId = promptsSchemaCheck.some(col => col.name === 'benchmark_id')
+
+if (!hasBenchmarkId) {
+  try {
+    db.exec(`ALTER TABLE ollama_prompts ADD COLUMN benchmark_id INTEGER`)
+  } catch (e) {
+    console.warn('[db] benchmark_id column migration:', e.message)
+  }
+}
 
 module.exports = db

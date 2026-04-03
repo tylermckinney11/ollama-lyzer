@@ -14,6 +14,7 @@
  */
 
 const express = require('express')
+const os      = require('os')
 const db      = require('../db')
 
 const router = express.Router()
@@ -32,6 +33,49 @@ function calcTps(completionTokens, evalDurationNs) {
   if (!Number.isFinite(completionTokens) || completionTokens <= 0) return 0
   if (!Number.isFinite(evalDurationNs)   || evalDurationNs   <= 0) return 0
   return Number((completionTokens / (evalDurationNs / 1_000_000_000)).toFixed(2))
+}
+
+// Collect system memory metrics (GPU VRAM + system RAM)
+async function getSystemMetrics() {
+  const metrics = {
+    gpu_vram_mb: null,
+    gpu_vram_pct: null,
+    system_ram_mb: null,
+    system_ram_pct: null,
+  }
+
+  // System RAM (always available)
+  try {
+    const totalMem = os.totalmem()
+    const freeMem = os.freemem()
+    const usedMem = totalMem - freeMem
+    metrics.system_ram_mb = Math.round(usedMem / (1024 * 1024))
+    metrics.system_ram_pct = Number(((usedMem / totalMem) * 100).toFixed(1))
+  } catch (e) {
+    console.error('[metrics] Failed to collect system RAM:', e.message)
+  }
+
+  // GPU VRAM (best-effort via nvidia-smi)
+  try {
+    const { exec } = await import('child_process')
+    const util = require('util')
+    const execAsync = util.promisify(exec)
+    
+    const { stdout } = await execAsync('nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits', {
+      timeout: 2000,
+      stdio: ['pipe', 'pipe', 'ignore']
+    })
+    
+    const [used, total] = stdout.trim().split(',').map(x => Number(x.trim()))
+    if (used && total) {
+      metrics.gpu_vram_mb = Math.round(used)
+      metrics.gpu_vram_pct = Number(((used / total) * 100).toFixed(1))
+    }
+  } catch (e) {
+    // nvidia-smi not available or no GPU
+  }
+
+  return metrics
 }
 
 // ── GET /models ───────────────────────────────────────────────────────────────
@@ -54,6 +98,9 @@ router.post('/benchmark', async (req, res) => {
   console.log(`[ollama/benchmark] Starting benchmark for model: ${model}`)
 
   try {
+    // Collect system metrics before benchmark
+    const beforeMetrics = await getSystemMetrics()
+
     const loadStart = Date.now()
 
     const r = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
@@ -77,6 +124,10 @@ router.post('/benchmark', async (req, res) => {
     })
 
     const loadTime = Date.now() - loadStart
+
+    // Collect system metrics after benchmark
+    const afterMetrics = await getSystemMetrics()
+
     if (!r.ok) throw new Error(`Ollama API error: ${r.statusText}`)
     const data = await r.json()
 
@@ -99,28 +150,40 @@ router.post('/benchmark', async (req, res) => {
       }
     } catch { /* non-fatal */ }
 
+    // Use peak values from before/after metrics
+    const systemMetrics = {
+      gpu_vram_mb: Math.max(beforeMetrics.gpu_vram_mb || 0, afterMetrics.gpu_vram_mb || 0),
+      gpu_vram_pct: Math.max(beforeMetrics.gpu_vram_pct || 0, afterMetrics.gpu_vram_pct || 0),
+      system_ram_mb: Math.max(beforeMetrics.system_ram_mb || 0, afterMetrics.system_ram_mb || 0),
+      system_ram_pct: Math.max(beforeMetrics.system_ram_pct || 0, afterMetrics.system_ram_pct || 0),
+    }
+
     const info = db.prepare(`
       INSERT INTO ollama_benchmarks
         (model_name, tokens_per_second, latency_ms, context_window, load_time_ms, vram_mb,
+         gpu_vram_mb, gpu_vram_pct, system_ram_mb, system_ram_pct,
          temperature, num_predict, num_thread, keep_alive, top_p, top_k, repeat_penalty)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(model, tokensPerSecond, durationMs, 4096, loadTime, vramMb,
+           systemMetrics.gpu_vram_mb, systemMetrics.gpu_vram_pct, systemMetrics.system_ram_mb, systemMetrics.system_ram_pct,
            temperature ?? 0.7, num_predict ?? 16, num_thread ?? 4,
            keep_alive || '5m', top_p ?? 0.9, top_k ?? 40, repeat_penalty ?? 1.1)
+
+    const benchmarkId = info.lastInsertRowid
 
     db.prepare(`
       INSERT INTO ollama_prompts
         (source_service, model_name, prompt_tokens, completion_tokens, total_tokens,
-         duration_ms, tokens_per_second, status_code)
-      VALUES (?,?,?,?,?,?,?,?)
+         duration_ms, tokens_per_second, status_code, benchmark_id)
+      VALUES (?,?,?,?,?,?,?,?,?)
     `).run('benchmark', model, promptTokens, completionTokens, totalTokens,
-           durationMs, tokensPerSecond, 200)
+           durationMs, tokensPerSecond, 200, benchmarkId)
 
-    console.log(`[ollama/benchmark] Completed #${info.lastInsertRowid} for ${model}`)
+    console.log(`[ollama/benchmark] Completed #${benchmarkId} for ${model}`)
 
     res.json({
       success: true,
-      benchmark_id: info.lastInsertRowid,
+      benchmark_id: benchmarkId,
       model,
       tokens_per_second: tokensPerSecond,
       latency_ms:        durationMs,
@@ -128,11 +191,30 @@ router.post('/benchmark', async (req, res) => {
       completion_tokens: completionTokens,
       total_tokens:      totalTokens,
       vram_mb:           vramMb,
+      gpu_vram_mb:       systemMetrics.gpu_vram_mb,
+      gpu_vram_pct:      systemMetrics.gpu_vram_pct,
+      system_ram_mb:     systemMetrics.system_ram_mb,
+      system_ram_pct:    systemMetrics.system_ram_pct,
       load_time_ms:      loadTime,
     })
   } catch (err) {
     console.error('[ollama/benchmark]', err.message)
     res.status(500).json({ error: 'Benchmark failed', message: err.message })
+  }
+})
+
+// ── GET /prompts ──────────────────────────────────────────────────────────────
+router.get('/metrics', async (_req, res) => {
+  try {
+    const metrics = await getSystemMetrics()
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      ...metrics,
+    })
+  } catch (err) {
+    console.error('[ollama/metrics]', err.message)
+    res.status(500).json({ error: 'Failed to collect metrics', message: err.message })
   }
 })
 
@@ -260,6 +342,60 @@ router.post('/log-prompt', (req, res) => {
   } catch (err) {
     console.error('[ollama/log-prompt]', err.message)
     res.status(500).json({ error: 'Failed to log prompt' })
+  }
+})
+
+// ── DELETE /benchmark/:id ─────────────────────────────────────────────────────
+router.delete('/benchmark/:id', (req, res) => {
+  const id = parseInt(req.params.id)
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ error: 'Invalid benchmark ID' })
+  }
+
+  try {
+    const result = db.prepare('DELETE FROM ollama_benchmarks WHERE id = ?').run(id)
+    
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'Benchmark not found' })
+    }
+
+    console.log(`[ollama/benchmark] Deleted benchmark #${id}`)
+    res.json({ success: true, deleted_id: id })
+  } catch (err) {
+    console.error('[ollama/benchmark DELETE]', err.message)
+    res.status(500).json({ error: 'Failed to delete benchmark', message: err.message })
+  }
+})
+
+// ── DELETE /prompts/:id ────────────────────────────────────────────────────────
+// Delete a prompt record. If it's a benchmark, also delete the benchmark record
+router.delete('/prompts/:id', (req, res) => {
+  const id = parseInt(req.params.id)
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ error: 'Invalid prompt ID' })
+  }
+
+  try {
+    // Get the prompt to check if it's a benchmark
+    const prompt = db.prepare('SELECT * FROM ollama_prompts WHERE id = ?').get(id)
+    
+    if (!prompt) {
+      return res.status(404).json({ error: 'Prompt not found' })
+    }
+
+    // If it's a benchmark, delete the benchmark record too
+    if (prompt.source_service === 'benchmark' && prompt.benchmark_id) {
+      db.prepare('DELETE FROM ollama_benchmarks WHERE id = ?').run(prompt.benchmark_id)
+      console.log(`[ollama/prompts] Deleted prompt #${id} and benchmark #${prompt.benchmark_id}`)
+    }
+
+    // Delete the prompt record
+    db.prepare('DELETE FROM ollama_prompts WHERE id = ?').run(id)
+    
+    res.json({ success: true, deleted_id: id, benchmark_deleted: prompt.source_service === 'benchmark' })
+  } catch (err) {
+    console.error('[ollama/prompts DELETE]', err.message)
+    res.status(500).json({ error: 'Failed to delete prompt', message: err.message })
   }
 })
 

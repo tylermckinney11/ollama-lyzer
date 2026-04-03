@@ -71,6 +71,21 @@ strong { font-weight: 700; }
   color: var(--text-muted);
 }
 
+.app-header__right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.app-header__copyright {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.app-header__copyright a:hover {
+  color: var(--accent2);
+}
+
 .app-header__link {
   font-size: 0.8rem;
   color: var(--text-muted);

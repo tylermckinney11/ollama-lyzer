@@ -9,14 +9,17 @@ export default function App() {
           <span className="app-header__title">Ollama Lyzer</span>
           <span className="app-header__sub">benchmark &amp; monitor</span>
         </div>
-        <a
-          href="https://github.com/noob/ollama-lyzer"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="app-header__link"
-        >
-          GitHub
-        </a>
+        <div className="app-header__right">
+          <span className="app-header__copyright">© 2026 Tyler Mckinney - <a href="https://effxs.com" target="_blank" rel="noopener noreferrer" style={{ color: '#58a6ff', textDecoration: 'none' }}>effxs.com</a></span>
+          <a
+            href="https://github.com/tylermckinney11/ollama-lyzer"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="app-header__link"
+          >
+            GitHub
+          </a>
+        </div>
       </header>
       <main className="app-main">
         <OllamaMonitor />
