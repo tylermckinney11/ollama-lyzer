@@ -78,6 +78,42 @@ async function getSystemMetrics() {
   return metrics
 }
 
+// ── GET /ps ──────────────────────────────────────────────────────────────────
+router.get('/ps', async (_req, res) => {
+  try {
+    const r = await fetch(`${OLLAMA_BASE_URL}/api/ps`, { signal: AbortSignal.timeout(5000) })
+    if (!r.ok) return res.status(r.status).json({ error: 'Failed to fetch ps', models: [] })
+    res.json(await r.json())
+  } catch (err) {
+    console.error('[ollama/ps]', err.message)
+    res.status(503).json({ error: 'Ollama service unavailable', message: err.message })
+  }
+})
+
+// ── POST /unload ──────────────────────────────────────────────────────────────
+router.post('/unload', async (req, res) => {
+  const { model } = req.body
+  if (!model || typeof model !== 'string' || !model.trim()) {
+    return res.status(400).json({ error: 'model is required' })
+  }
+  try {
+    const r = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: model.trim(), keep_alive: 0, stream: false }),
+      signal: AbortSignal.timeout(30_000),
+    })
+    // Drain response body so the connection closes and Ollama can finish eviction
+    await r.text().catch(() => {})
+    if (!r.ok) return res.status(r.status).json({ error: 'Unload request failed', message: r.statusText })
+    console.log(`[ollama/unload] Evicted model: ${model.trim()}`)
+    res.json({ success: true, model: model.trim() })
+  } catch (err) {
+    console.error('[ollama/unload]', err.message)
+    res.status(503).json({ error: 'Ollama service unavailable', message: err.message })
+  }
+})
+
 // ── GET /models ───────────────────────────────────────────────────────────────
 router.get('/models', async (_req, res) => {
   try {
@@ -118,7 +154,7 @@ router.post('/benchmark', async (req, res) => {
           top_k:          top_k          ?? 40,
           repeat_penalty: repeat_penalty ?? 1.1,
         },
-        keep_alive: keep_alive || '5m',
+        keep_alive: keep_alive || '1m',
       }),
       signal: AbortSignal.timeout(120_000),
     })
@@ -353,14 +389,17 @@ router.delete('/benchmark/:id', (req, res) => {
   }
 
   try {
-    const result = db.prepare('DELETE FROM ollama_benchmarks WHERE id = ?').run(id)
-    
-    if (result.changes === 0) {
+    const benchmark = db.prepare('SELECT id FROM ollama_benchmarks WHERE id = ?').get(id)
+    if (!benchmark) {
       return res.status(404).json({ error: 'Benchmark not found' })
     }
 
-    console.log(`[ollama/benchmark] Deleted benchmark #${id}`)
-    res.json({ success: true, deleted_id: id })
+    // Delete linked prompt record(s) before removing the benchmark
+    const promptsResult = db.prepare('DELETE FROM ollama_prompts WHERE benchmark_id = ?').run(id)
+    db.prepare('DELETE FROM ollama_benchmarks WHERE id = ?').run(id)
+
+    console.log(`[ollama/benchmark] Deleted benchmark #${id} and ${promptsResult.changes} linked prompt(s)`)
+    res.json({ success: true, deleted_id: id, prompts_deleted: promptsResult.changes })
   } catch (err) {
     console.error('[ollama/benchmark DELETE]', err.message)
     res.status(500).json({ error: 'Failed to delete benchmark', message: err.message })
